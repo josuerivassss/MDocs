@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { CoverSheet } from './Cover.jsx'
-import { splitSections, styleVars, uid } from './store.js'
+import { splitSections, styleVars } from './store.js'
+import { cache, ensure, keyOf, isDiagram } from './diagrams.js'
 
 DOMPurify.addHook('afterSanitizeAttributes', (n) => {
   if (n.tagName === 'IMG' && !/^data:image\/(png|jpeg|gif);base64,/.test(n.getAttribute('src') || '')) n.removeAttribute('src')
@@ -17,14 +18,13 @@ const CLEAN = {
   FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed']
 }
 
-const cache = new Map()
 let cur = []
 
 marked.use({
   renderer: {
     code({ text, lang }) {
-      if (lang !== 'mermaid') return false
-      cur.push(text)
+      if (!isDiagram(lang)) return false
+      cur.push([lang, text])
       return `<div class="mmd" data-m="${cur.length - 1}"></div>`
     }
   }
@@ -34,7 +34,7 @@ function render(s) {
   cur = []
   const found = cur
   const h = DOMPurify.sanitize(marked.parse(s), CLEAN)
-  return h.replace(/<div class="mmd" data-m="(\d+)"><\/div>/g, (a, i) => `<div class="mmd">${cache.get(found[i]) ?? 'Renderizando diagrama…'}</div>`)
+  return h.replace(/<div class="mmd" data-m="(\d+)"><\/div>/g, (a, i) => `<div class="mmd">${cache.get(keyOf(found[i][0], found[i][1])) ?? 'Renderizando diagrama…'}</div>`)
 }
 
 function paginate(el, limit) {
@@ -106,32 +106,25 @@ function paginate(el, limit) {
   return pages.map((p) => p.join(''))
 }
 
-export default function Preview({ md, m, bl, st, zoom }) {
+export default function Preview({ md, m, bl, st, zoom, onMove }) {
   const ref = useRef()
   const [pages, setPages] = useState([])
   const [tick, setTick] = useState(0)
   const vars = styleVars(st)
   const sk = JSON.stringify(vars)
 
-  useEffect(() => {
-    const need = new Set()
+    useEffect(() => {
+    const need = new Map()
     marked.walkTokens(marked.lexer(md), (t) => {
-      if (t.type === 'code' && t.lang === 'mermaid' && !cache.has(t.text)) need.add(t.text)
+      if (t.type !== 'code' || !isDiagram(t.lang)) return
+      const k = keyOf(t.lang, t.text)
+      if (!cache.has(k)) need.set(k, [t.lang, t.text])
     })
     if (!need.size) return
     let dead = false
     ;(async () => {
-      const mm = (await import('mermaid')).default
-      mm.initialize({ startOnLoad: false, securityLevel: 'strict', flowchart: { htmlLabels: false } })
-      for (const c of need) {
-        try {
-          const { svg } = await mm.render('m' + uid(), c)
-          cache.set(c, DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true, html: true } }))
-        } catch {
-          cache.set(c, '<pre>Diagrama inválido</pre>')
-        }
-      }
-      if (!dead) setTick((t) => t + 1)
+      for (const [l, t] of need.values()) await ensure(l, t)
+      if (!dead) setTick((n) => n + 1)
     })()
     return () => {
       dead = true
@@ -154,7 +147,7 @@ export default function Preview({ md, m, bl, st, zoom }) {
   return (
     <>
       <div className="sheets" style={{ ...vars, zoom }}>
-        <CoverSheet m={m} bl={bl} />
+        <CoverSheet m={m} bl={bl} zoom={zoom} onMove={onMove} />
         {pages.map((p, i) => (
           <section className={'sheet' + (p.land ? ' land' : '')} key={i}>
             {st.header && <header>{st.header}</header>}

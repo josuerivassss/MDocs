@@ -100,18 +100,10 @@ export function splitSections(md) {
   return out
 }
 
-export function createWorkspace() {
-  const p = new URLSearchParams(location.hash.slice(1))
-  let room = p.get('sala')
-  let key = p.get('clave')
-  if (!/^[a-f0-9]{32}$/.test(room || '') || !/^[a-f0-9]{32}$/.test(key || '')) {
-    room = rid(16)
-    key = rid(16)
-    location.hash = `sala=${room}&clave=${key}`
-  }
+export function createWorkspace(room, key, user, owner) {
   const doc = new Y.Doc()
   const idb = new IndexeddbPersistence('reqdocs-' + room, doc)
-  const rtc = new WsProvider(doc, room, key)
+  const rtc = new WsProvider(doc, room, key, user.name, owner)
   idb.whenSynced.then(() => rtc.start())
   return { doc, idb, rtc, docs: doc.getMap('docs') }
 }
@@ -143,4 +135,97 @@ export function useY(type) {
     type.observeDeep(f)
     return () => type.unobserveDeep(f)
   }, [type])
+}
+
+const HEX = /^[a-f0-9]{32}$/
+const read = (k, d) => {
+  try {
+    return JSON.parse(localStorage.getItem(k) || 'null') ?? d
+  } catch {
+    return d
+  }
+}
+const write = (k, v) => {
+  try {
+    localStorage.setItem(k, JSON.stringify(v))
+  } catch {
+    return
+  }
+}
+export const loadRooms = () => {
+  const l = read('rd-rooms', [])
+  return Array.isArray(l) ? l.filter((r) => r && HEX.test(r.room) && HEX.test(r.key)) : []
+}
+export const saveRooms = (l) => write('rd-rooms', l)
+export const getUser = () => {
+  const u = read('rd-user', null)
+  return u && typeof u.name === 'string' && u.name ? u : null
+}
+export const saveUser = (u) => write('rd-user', u)
+
+export function applyToc(md) {
+  let fence = false
+  const heads = []
+  md.split('\n').forEach((l) => {
+    if (/^```/.test(l)) fence = !fence
+    const h = !fence && l.match(/^(#{1,4})\s+(.+?)\s*#*$/)
+    if (h) heads.push('  '.repeat(h[1].length - 1) + '- ' + h[2])
+  })
+  return md.replace(/^\[TOC\][ \t]*$/gm, () => heads.join('\n'))
+}
+
+export function prepare(md, vars) {
+  const defs = {}
+  const body = md.replace(/^```vars[^\n]*\n([\s\S]*?)^```[ \t]*\n?/gm, (_, b) => {
+    b.split('\n').forEach((l) => {
+      const m = l.match(/^@var\(\s*([\w-]+)\s*,\s*(.*)\)\s*$/)
+      if (m) defs[m[1]] = m[2]
+    })
+    return ''
+  })
+  const all = { ...vars, ...defs }
+  return { md: applyToc(applyVars(body, all)), vars: all }
+}
+
+
+export const COVER_DEFAULTS = {
+  institucion: { x: 96, y: 80, w: 624, align: 'center' },
+  tipo: { x: 96, y: 125, w: 624, align: 'center' },
+  titulo: { x: 96, y: 280, w: 624, align: 'center' },
+  subtitulo: { x: 96, y: 380, w: 624, align: 'center' },
+  autores: { x: 96, y: 880, w: 624, align: 'center' },
+  version: { x: 96, y: 930, w: 624, align: 'center' }
+}
+
+export const PRESETS = {
+  'Arriba izquierda': [80, 'left'],
+  'Arriba centro': [80, 'center'],
+  'Arriba derecha': [80, 'right'],
+  'Centro': [480, 'center'],
+  'Abajo izquierda': [900, 'left'],
+  'Abajo centro': [900, 'center'],
+  'Abajo derecha': [900, 'right']
+}
+
+const ALIGNS = ['left', 'center', 'right']
+const al = (a) => (ALIGNS.includes(a) ? a : 'center')
+
+export const coverPos = (m, k) => {
+  const o = m['pos_' + k]
+  const p = { ...COVER_DEFAULTS[k], ...(o && typeof o === 'object' ? o : {}) }
+  return { x: num(p.x, 96, -816, 816), y: num(p.y, 80, 0, 1056), w: num(p.w, 624, 40, 816), align: al(p.align) }
+}
+
+export const blockPos = (b, i) => {
+  const free = b.mode === 'free'
+  if (b.kind === 'img') {
+    const w = num(b.w, 120, 10, 816)
+    return {
+      x: free ? num(b.x, (816 - w) / 2, -816, 816) : (816 - w) / 2,
+      y: free ? num(b.y, 440 + i * 50, 0, 1056) : 440 + i * 50,
+      w,
+      align: 'center'
+    }
+  }
+  return { x: num(b.x, 96, -816, 816), y: num(b.y, 440 + i * 50, 0, 1056), w: num(b.w, 624, 40, 816), align: al(b.align) }
 }

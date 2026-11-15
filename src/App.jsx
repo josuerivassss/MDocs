@@ -1,31 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Heading1, Heading2, Heading3, Bold, List, ListOrdered, Table, Code, Workflow, RectangleHorizontal, RectangleVertical,
-  ZoomIn, ZoomOut, RotateCcw, Users, Wifi, WifiOff, FileText, FileCode, FileDown, Printer, Link2, HardDrive,
-  Sun, Moon, Plus, Pencil, X, Palette, BookOpen
+  Heading1, Heading2, Heading3, Bold, Italic, List, ListOrdered, Table, Code, Workflow, RectangleHorizontal, RectangleVertical,
+  Image as ImageIcon, ListTree, FileText, FileCode, FileDown, Printer, Link2, Sun, Moon, Home as HomeIcon, Plus, Pencil, X,
+  Palette, BookOpen, Wifi, WifiOff, HardDrive, ZoomIn, ZoomOut, RotateCcw
 } from 'lucide-react'
-import { createWorkspace, newDoc, bind, useY, applyVars } from './store.js'
+import { createWorkspace, newDoc, bind, useY, prepare, applyVars, FONTS, loadRooms, saveRooms, getUser, saveUser, coverPos } from './store.js'
 import { TEMPLATES } from './templates.js'
 import { CoverPanel } from './Cover.jsx'
 import { StylePanel } from './StylePanel.jsx'
 import Preview from './Preview.jsx'
+import Ribbon from './Ribbon.jsx'
+import Home from './Home.jsx'
 import { exportMd, exportHtml, exportDocx } from './export.js'
 
-const W = createWorkspace()
-
-const tools = [
-  [Heading1, 'Encabezado 1', '# ', ''],
-  [Heading2, 'Encabezado 2', '## ', ''],
-  [Heading3, 'Encabezado 3', '### ', ''],
-  [Bold, 'Negrita', '**', ''],
-  [List, 'Lista con viñetas', '- ', ''],
-  [ListOrdered, 'Lista numerada', '1. ', ''],
-  [Table, 'Tabla', '\n| Columna 1 | Columna 2 |\n|---|---|\n| ', ' | |\n'],
-  [Code, 'Bloque de código', '\n```\n', '\n```\n'],
-  [Workflow, 'Diagrama Mermaid', '\n```mermaid\n', '\n```\n', 'graph TD\n  A[Inicio] --> B[Fin]'],
-  [RectangleHorizontal, 'Siguiente página en horizontal', '\n@pagina(horizontal)\n', '', ''],
-  [RectangleVertical, 'Siguiente página en vertical', '\n@pagina(vertical)\n', '', '']
-]
+const logo = import.meta.env.BASE_URL + 'logo.png'
 
 const Zoom = ({ v, set }) => (
   <div className="zoom">
@@ -42,6 +30,8 @@ const Zoom = ({ v, set }) => (
   </div>
 )
 
+const B = (i, t, on, big) => ({ i, t, on, big })
+
 function DocView({ S }) {
   useY(S.text)
   useY(S.meta)
@@ -52,6 +42,7 @@ function DocView({ S }) {
   const [ze, setZe] = useState(1)
   const [zp, setZp] = useState(1)
   const [panel, setPanel] = useState(null)
+  const [tab, setTab] = useState('Inicio')
   const ta = useRef()
   const main = useRef()
   const md = S.text.toString()
@@ -59,9 +50,9 @@ function DocView({ S }) {
   const bl = S.blocks.toArray()
   const vars = Object.fromEntries(S.vars.entries())
   const st = Object.fromEntries(S.style.entries())
-  const rm = Object.fromEntries(Object.entries(m).map(([k, x]) => [k, typeof x === 'string' ? applyVars(x, vars) : x]))
-  const rst = { ...st, header: applyVars(String(st.header || ''), vars) }
-  const rmd = applyVars(md, vars)
+  const pre = prepare(md, vars)
+  const rm = Object.fromEntries(Object.entries(m).map(([k, x]) => [k, typeof x === 'string' ? applyVars(x, pre.vars) : x]))
+  const rst = { ...st, header: applyVars(String(st.header || ''), pre.vars) }
 
   const setMd = (v) => {
     const o = S.text.toString()
@@ -75,17 +66,24 @@ function DocView({ S }) {
     })
   }
 
-  const wrap = (pre, post, ph) => {
+  const wrap = (p, post, ph) => {
     const t = ta.current
     const s = t.selectionStart
     const e = t.selectionEnd
     const v = t.value
     const sel = v.slice(s, e) || (ph ?? 'texto')
-    setMd(v.slice(0, s) + pre + sel + post + v.slice(e))
+    setMd(v.slice(0, s) + p + sel + post + v.slice(e))
     requestAnimationFrame(() => {
       t.focus()
-      t.setSelectionRange(s + pre.length, s + pre.length + sel.length)
+      t.setSelectionRange(s + p.length, s + p.length + sel.length)
     })
+  }
+
+  const image = () => {
+    const u = prompt('URL de la imagen (https://...)')
+    if (!u || !/^https:\/\//i.test(u)) return
+    const t = (prompt('Texto alternativo') || 'imagen').replace(/[[\]]/g, '')
+    wrap('', `![${t}](${u})`, '')
   }
 
   const pickTemplate = (e) => {
@@ -105,92 +103,140 @@ function DocView({ S }) {
 
   const toggle = (p) => setPanel(panel === p ? null : p)
 
+    const moveCover = (id, pos) => {
+    if (typeof id === 'string') {
+      S.meta.set('pos_' + id, { ...coverPos(m, id), ...pos })
+      return
+    }
+    S.doc.transact(() => {
+      S.blocks.delete(id, 1)
+      S.blocks.insert(id, [{ ...bl[id], ...pos, mode: 'free' }])
+    })
+  }
+
+  const model = {
+    Archivo: [
+      ['Exportar', [B(FileText, 'Markdown', () => exportMd(md, m, vars), 1), B(FileCode, 'HTML', () => exportHtml(rm, rst), 1), B(FileDown, 'Word', () => exportDocx(pre.md, rm, bl, rst), 1), B(Printer, 'PDF', () => window.print(), 1)]],
+      [
+        'Plantillas',
+        [
+          {
+            node: (
+              <select defaultValue="" title="Plantillas" onChange={pickTemplate}>
+                <option value="">Elegir…</option>
+                <option value="DRN">DRN</option>
+                <option value="DRU">DRU</option>
+                <option value="DRS">DRS (IEEE 830)</option>
+              </select>
+            )
+          }
+        ]
+      ]
+    ],
+    Inicio: [
+      [
+        'Fuente',
+        [
+          {
+            node: (
+              <select title="Fuente del documento" value={st.fontBody || FONTS[0]} onChange={(e) => S.style.set('fontBody', e.target.value)}>
+                {FONTS.map((f) => (
+                  <option key={f} value={f}>
+                    {f.split(',')[0]}
+                  </option>
+                ))}
+              </select>
+            )
+          },
+          { node: <input type="number" title="Tamaño del texto (pt)" style={{ width: 52 }} value={st.sizeBody ?? 11} onChange={(e) => S.style.set('sizeBody', Number(e.target.value))} /> },
+          B(Bold, 'Negrita', () => wrap('**', '**')),
+          B(Italic, 'Cursiva', () => wrap('*', '*'))
+        ]
+      ],
+      ['Párrafo', [B(Heading1, 'Título 1', () => wrap('# ', '')), B(Heading2, 'Título 2', () => wrap('## ', '')), B(Heading3, 'Título 3', () => wrap('### ', '')), B(List, 'Viñetas', () => wrap('- ', '')), B(ListOrdered, 'Numeración', () => wrap('1. ', ''))]]
+    ],
+    Insertar: [
+      [
+        'Elementos',
+        [
+          B(Table, 'Tabla', () => wrap('\n| Columna 1 | Columna 2 |\n|---|---|\n| ', ' | |\n'), 1),
+          B(Code, 'Código', () => wrap('\n```\n', '\n```\n'), 1),
+          B(ImageIcon, 'Imagen URL', image, 1),
+          B(Workflow, 'Mermaid', () => wrap('\n```mermaid\n', '\n```\n', 'graph TD\n  A[Inicio] --> B[Fin]'), 1),
+          B(ListTree, 'Índice', () => wrap('\n[TOC]\n', '', ''), 1)
+        ]
+      ],
+      ['Página', [B(RectangleHorizontal, 'Horizontal', () => wrap('\n@pagina(horizontal)\n', '', ''), 1), B(RectangleVertical, 'Vertical', () => wrap('\n@pagina(vertical)\n', '', ''), 1)]],
+      ['Variables', [B(Palette, 'Bloque vars', () => wrap('\n```vars\n', '\n```\n', '@var(id, contenido)'), 1)]]
+    ],
+    Diseño: [
+      ['Documento', [B(BookOpen, 'Portada', () => toggle('cover'), 1), B(Palette, 'Estilo y variables', () => toggle('style'), 1)]],
+      ['Zoom editor', [{ node: <Zoom v={ze} set={setZe} /> }]],
+      ['Zoom vista previa', [{ node: <Zoom v={zp} set={setZp} /> }]]
+    ]
+  }
+
   return (
-    <div className="main" ref={main}>
-      <section className="left" style={{ width: `calc(${split}% - 4px)` }}>
-        <div className="bar">
-          {tools.map(([Icon, tip, pre, post, ph]) => (
-            <button key={tip} title={tip} onClick={() => wrap(pre, post, ph)}>
-              <Icon size={16} />
-            </button>
-          ))}
-          <select defaultValue="" title="Plantillas" onChange={pickTemplate}>
-            <option value="">Plantilla…</option>
-            <option value="DRN">DRN</option>
-            <option value="DRU">DRU</option>
-            <option value="DRS">DRS (IEEE 830)</option>
-          </select>
-          <button title="Portada, pie de página e imágenes" onClick={() => toggle('cover')}>
-            <BookOpen size={16} />
-          </button>
-          <button title="Fuentes, tamaños, tablas, encabezado y variables" onClick={() => toggle('style')}>
-            <Palette size={16} />
-          </button>
-          <Zoom v={ze} set={setZe} />
-        </div>
-        {panel === 'cover' && <CoverPanel S={S} m={m} bl={bl} />}
-        {panel === 'style' && <StylePanel S={S} st={st} vars={vars} />}
-        <textarea ref={ta} className="editor" spellCheck={false} style={{ fontSize: 14 * ze + 'px' }} value={md} onChange={(e) => setMd(e.target.value)} />
-      </section>
-      <div className="resizer" onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)} onPointerMove={drag} />
-      <section className="right">
-        <div className="bar pv-bar">
-          <button title="Exportar Markdown" onClick={() => exportMd(md, m, vars)}>
-            <FileText size={16} /> .md
-          </button>
-          <button title="Exportar HTML" onClick={() => exportHtml(rm, rst)}>
-            <FileCode size={16} /> .html
-          </button>
-          <button title="Exportar Word" onClick={() => exportDocx(rmd, rm, bl, rst)}>
-            <FileDown size={16} /> .docx
-          </button>
-          <button title="Exportar PDF (imprimir)" onClick={() => window.print()}>
-            <Printer size={16} /> .pdf
-          </button>
-          <Zoom v={zp} set={setZp} />
-        </div>
-        <div className="pv-scroll">
-          <Preview md={rmd} m={rm} bl={bl} st={rst} zoom={zp} />
-        </div>
-      </section>
-    </div>
+    <>
+      <Ribbon model={model} tab={tab} setTab={setTab} />
+      <div className="main" ref={main}>
+        <section className="left" style={{ width: `calc(${split}% - 4px)` }}>
+          {panel === 'cover' && <CoverPanel S={S} m={m} bl={bl} />}
+          {panel === 'style' && <StylePanel S={S} st={st} vars={vars} />}
+          <textarea ref={ta} className="editor" spellCheck={false} style={{ fontSize: 14 * ze + 'px' }} value={md} onChange={(e) => setMd(e.target.value)} />
+        </section>
+        <div className="resizer" onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)} onPointerMove={drag} />
+        <section className="right">
+          <div className="pv-scroll">
+            <Preview md={pre.md} m={rm} bl={bl} st={rst} zoom={zp} onMove={moveCover} />
+          </div>
+        </section>
+      </div>
+    </>
   )
 }
 
-const initTheme = () => {
-  try {
-    return localStorage.getItem('rd-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-  } catch {
-    return 'light'
-  }
-}
+const Title = ({ theme, setTheme, children }) => (
+  <header className="top">
+    <img src={logo} alt="" />
+    <b>ReqDocs Studio</b>
+    <span className="sp" />
+    {children}
+    <button title="Cambiar modo claro u oscuro" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+      {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+    </button>
+  </header>
+)
 
-export default function App() {
+function Room({ room, keyStr, user, notify, theme, setTheme }) {
+  const W = useMemo(() => {
+    const list = loadRooms()
+    const rec = list.find((r) => r.room === room)
+    saveRooms(rec ? list.map((r) => (r.room === room ? { ...r, ts: Date.now() } : r)) : [{ room, key: keyStr, owner: '', name: 'Sala ' + room.slice(0, 4), ts: Date.now() }, ...list])
+    return createWorkspace(room, keyStr, user, rec && rec.owner)
+  }, [])
   useY(W.docs)
   const [active, setActive] = useState(null)
-  const [theme, setTheme] = useState(initTheme)
   const [net, setNet] = useState(W.rtc.state)
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme
-    try {
-      localStorage.setItem('rd-theme', theme)
-    } catch {
-      document.documentElement.dataset.theme = theme
-    }
-  }, [theme])
-
-  useEffect(() => {
     W.idb.whenSynced.then(() => setSaved(true))
-    const handle = (s) => {
+    W.rtc.onChange = (s) => {
       setNet({ ...s })
       if (s.ready && W.docs.size === 0) newDoc(W, 'Documento 1', TEMPLATES.DRS, 'inicial')
     }
-    W.rtc.onChange = handle
-    handle(W.rtc.state)
+    W.rtc.onGone = () => {
+      saveRooms(loadRooms().filter((r) => r.room !== room))
+      indexedDB.deleteDatabase('reqdocs-' + room)
+      notify('La sala fue eliminada por su propietario')
+      location.hash = ''
+    }
     return () => {
       W.rtc.onChange = null
+      W.rtc.onGone = null
+      W.rtc.stop()
+      W.doc.destroy()
     }
   }, [])
 
@@ -209,36 +255,37 @@ export default function App() {
   const remove = () => {
     if (ids.length > 1 && confirm('¿Eliminar este documento para todos los participantes?')) W.docs.delete(id)
   }
+  const share = () => navigator.clipboard.writeText(location.href).then(() => notify('Enlace copiado al portapapeles'))
+  const docName = (d) => (W.docs.has(d) ? String(W.docs.get(d).get('name')) : '')
 
   return (
     <div className="app">
-      <header className="top">
-        <b>ReqDocs Studio</b>
+      <Title theme={theme} setTheme={setTheme}>
+        <button title="Volver a mis salas" onClick={() => (location.hash = '')}>
+          <HomeIcon size={14} /> Inicio
+        </button>
         <span className="badge" title={net.online ? 'Conectado al servidor' : 'Sin conexión: los cambios se guardan y se fusionan al reconectar'}>
           {net.online ? <Wifi size={14} /> : <WifiOff size={14} />}
           {net.online ? (net.ready ? 'Sincronizado' : 'Conectando') : 'Sin conexión'}
         </span>
-        <span className="badge" title="Usuarios conectados">
-          <Users size={14} /> {net.total}
-        </span>
         <span className="badge" title="Guardado automático en este navegador">
           <HardDrive size={14} /> {saved ? 'Guardado local' : 'Cargando'}
         </span>
-        <button title="Copiar enlace de la sala (incluye la clave de acceso)" onClick={() => navigator.clipboard.writeText(location.href)}>
-          <Link2 size={16} /> Compartir
+        {net.users.map((u) => (
+          <span key={u.id} className="av" style={{ background: u.color }} title={`${u.name}${u.doc ? ' · ' + docName(u.doc) : ''}`}>
+            {u.name.slice(0, 1).toUpperCase()}
+          </span>
+        ))}
+        <button title="Copiar enlace de invitación" onClick={share}>
+          <Link2 size={14} /> Compartir
         </button>
-        <button title="Cambiar modo claro u oscuro" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
-          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-        </button>
-      </header>
+      </Title>
       <nav className="tabs">
         {ids.map((i) => (
           <div key={i} className={'tab' + (i === id ? ' on' : '')}>
             <button title="Abrir documento" onClick={() => setActive(i)}>
-              {String(W.docs.get(i).get('name'))}
-              <small>
-                <Users size={11} /> {net.byDoc[i] || 0}
-              </small>
+              {docName(i)}
+              <small>{net.byDoc[i] || 0}</small>
             </button>
             {i === id && (
               <>
@@ -260,5 +307,94 @@ export default function App() {
       </nav>
       {S ? <DocView key={id} S={S} /> : <p className="loading">Cargando…</p>}
     </div>
+  )
+}
+
+const initTheme = () => {
+  try {
+    return localStorage.getItem('rd-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  } catch {
+    return 'light'
+  }
+}
+
+function NameModal({ onDone }) {
+  const [n, setN] = useState('')
+  return (
+    <div className="modal">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (n.trim()) onDone({ name: n.trim().slice(0, 24) })
+        }}
+      >
+        <img src={logo} alt="" height="40" />
+        <b>Bienvenido a ReqDocs Studio</b>
+        <label className="fld">
+          <span>¿Cómo te llamas?</span>
+          <input autoFocus maxLength={24} value={n} onChange={(e) => setN(e.target.value)} />
+        </label>
+        <button type="submit">Entrar</button>
+      </form>
+    </div>
+  )
+}
+
+export default function App() {
+  const [hash, setHash] = useState(location.hash)
+  const [toast, setToast] = useState('')
+  const [user, setUser] = useState(getUser)
+  const [theme, setTheme] = useState(initTheme)
+
+  useEffect(() => {
+    const f = () => setHash(location.hash)
+    window.addEventListener('hashchange', f)
+    return () => window.removeEventListener('hashchange', f)
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try {
+      localStorage.setItem('rd-theme', theme)
+    } catch {
+      document.documentElement.dataset.theme = theme
+    }
+  }, [theme])
+
+  const notify = (t) => {
+    setToast(t)
+    setTimeout(() => setToast(''), 2500)
+  }
+
+  const p = new URLSearchParams(hash.slice(1))
+  const room = p.get('sala')
+  const key = p.get('clave')
+  const valid = /^[a-f0-9]{32}$/.test(room || '') && /^[a-f0-9]{32}$/.test(key || '')
+
+  if (!user) {
+    return (
+      <NameModal
+        onDone={(u) => {
+          saveUser(u)
+          setUser(u)
+        }}
+      />
+    )
+  }
+
+  return (
+    <>
+      {valid ? (
+        <Room key={room} room={room} keyStr={key} user={user} notify={notify} theme={theme} setTheme={setTheme} />
+      ) : (
+        <div className="app">
+          <Title theme={theme} setTheme={setTheme}>
+            <span className="badge">{user.name}</span>
+          </Title>
+          <Home notify={notify} />
+        </div>
+      )}
+      {toast && <div className="toast">{toast}</div>}
+    </>
   )
 }

@@ -22,9 +22,11 @@ import {
   BorderStyle,
   PageOrientation
 } from 'docx'
-import { splitSections, safeImg, cleanStyle, styleVars } from './store.js'
+import { splitSections, safeImg, cleanStyle, styleVars, coverPos, blockPos } from './store.js'
+import { cache, keyOf, isDiagram, ensure, svgToPng } from './diagrams.js'
 
 let ST = cleanStyle({})
+let IMGS = new Map()
 
 const slug = (m) =>
   (m.titulo || 'documento')
@@ -85,6 +87,10 @@ const blk = (t, lv = 0) => {
   if (t.type === 'paragraph') return [new Paragraph({ children: inl(t.tokens), spacing: { after: 120 } })]
   if (t.type === 'blockquote') return t.tokens.flatMap((x) => blk(x, lv))
   if (t.type === 'code') {
+    const im = isDiagram(t.lang) && IMGS.get(keyOf(t.lang, t.text))
+    if (im) {
+      return [new Paragraph({ alignment: AlignmentType.CENTER, children: [new ImageRun({ type: 'png', data: im.data, transformation: { width: im.w, height: im.h } })] })]
+    }
     return t.text.split('\n').map(
       (l) =>
         new Paragraph({
@@ -127,48 +133,72 @@ const blk = (t, lv = 0) => {
   return []
 }
 
-const img = (b) => {
+const img = (b, p) => {
   const [head, data] = b.src.split(',')
   const type = /png/.test(head) ? 'png' : /gif/.test(head) ? 'gif' : 'jpg'
-  const o = {
+  return new ImageRun({
     type,
     data: Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
-    transformation: { width: b.w, height: b.h }
-  }
-  if (b.mode === 'free') {
-    o.floating = {
-      horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: Math.round(b.x * 9525) },
-      verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: Math.round(b.y * 9525) },
+    transformation: { width: p.w, height: Number(b.h) || p.w },
+    floating: {
+      horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: Math.round(p.x * 9525) },
+      verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: Math.round(p.y * 9525) },
       behindDocument: b.z < 0,
       allowOverlap: true
     }
-  }
-  return new ImageRun(o)
+  })
 }
 
-const P = (text, o = {}) =>
-  new Paragraph({
-    alignment: al[o.align || 'center'],
-    spacing: { before: o.before || 0, after: o.after ?? 200 },
-    children: [new TextRun({ text: text || '', size: o.size, bold: o.bold })]
+const tw = (v) => Math.round(v * 15)
+
+const framed = (text, p, size, o = {}) => {
+  const cpl = Math.max(1, Math.floor((p.w * 0.75) / (size * 0.5)))
+  const lines = Math.max(1, Math.ceil(String(text || '').length / cpl))
+  return new Paragraph({
+    alignment: al[p.align],
+    frame: {
+      type: 'absolute',
+      position: { x: tw(p.x), y: tw(p.y) },
+      width: tw(p.w),
+      height: Math.round(lines * size * 1.4 * 20),
+      anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE }
+    },
+    children: [new TextRun({ text: String(text || ''), size: size * 2, bold: o.bold })]
   })
+}
 
 const cover = (m, bl) => [
-  P(m.institucion, { size: 32, bold: true }),
-  P(m.tipo, { size: 26 }),
-  P(m.titulo, { size: ST.sizeTitle * 2, bold: true, before: 2400, after: 240 }),
-  P(m.subtitulo, { size: ST.sizeSub * 2, after: 600 }),
-  ...bl.filter((b) => b.kind === 'txt' || safeImg(b.src)).map((b) =>
-    b.kind === 'txt'
-      ? P(b.text, { align: b.align, size: b.size * 2, bold: b.bold })
-      : new Paragraph({ alignment: al[b.align], children: [img(b)] })
-  ),
-  P(m.autores, { before: 1800 }),
-  P(`Versión ${m.version} · ${m.fecha}`)
+  framed(m.institucion, coverPos(m, 'institucion'), 16, { bold: true }),
+  framed(m.tipo, coverPos(m, 'tipo'), 13),
+  framed(m.titulo, coverPos(m, 'titulo'), ST.sizeTitle, { bold: true }),
+  framed(m.subtitulo, coverPos(m, 'subtitulo'), ST.sizeSub),
+  framed(m.autores, coverPos(m, 'autores'), 11),
+  framed('Versión ' + m.version + ' · ' + m.fecha, coverPos(m, 'version'), 11),
+  ...bl.flatMap((b, i) => {
+    if (b.kind === 'txt') {
+      return [framed(b.text, blockPos(b, i), Math.min(96, Math.max(6, Number(b.size) || 16)), { bold: b.bold })]
+    }
+    if (!safeImg(b.src)) return []
+    return [new Paragraph({ children: [img(b, blockPos(b, i))] })]
+  })
 ]
 
 export async function exportDocx(md, m, bl, st) {
   ST = cleanStyle(st)
+    const found = new Map()
+  marked.walkTokens(marked.lexer(md || ''), (t) => {
+    if (t.type === 'code' && isDiagram(t.lang)) found.set(keyOf(t.lang, t.text), [t.lang, t.text])
+  })
+  IMGS = new Map()
+  for (const [k, [l, t]] of found) {
+    await ensure(l, t)
+    try {
+      const r = await svgToPng(cache.get(k))
+      if (r) IMGS.set(k, r)
+    } catch {
+      continue
+    }
+  }
   const fb = ST.fontBody.split(',')[0]
   const fh = ST.fontHead.split(',')[0]
   const margin = { top: 1440, right: 1440, bottom: 1440, left: 1440 }

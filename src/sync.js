@@ -9,7 +9,10 @@ const dec = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
 const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '').replace(/^http/, 'ws')
 
 export class WsProvider {
-  constructor(doc, room, key) {
+  constructor(doc, room, key, name, owner) {
+    this.name = name
+    this.owner = owner || ''
+    this.onGone = null
     this.doc = doc
     this.room = room
     this.key = key
@@ -21,7 +24,7 @@ export class WsProvider {
     this.cur = ''
     this.onChange = null
     this.cid = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('')
-    this.state = { online: false, ready: false, total: 1, byDoc: {} }
+    this.state = { online: false, ready: false, total: 1, byDoc: {}, users: [] }
     doc.on('update', this.onUpdate)
   }
 
@@ -59,7 +62,7 @@ export class WsProvider {
     ws.onopen = () => {
       this.retry = 0
       this.mirror = new Y.Doc()
-      this.send({ t: 'hello', key: this.key, client: this.cid, doc: this.cur })
+      this.send({ t: 'hello', key: this.key, client: this.cid, doc: this.cur, name: this.name, owner: this.owner })
       this.hb = setInterval(() => this.send({ t: 'ping' }), 25000)
     }
     ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
@@ -91,8 +94,11 @@ export class WsProvider {
       this.setState({ online: true, ready: true })
     } else if (m.t === 'upd') {
       Y.applyUpdate(this.doc, dec(m.u), this)
+    } else if (m.t === 'gone') {
+      if (this.onGone) this.onGone()
     } else if (m.t === 'pres') {
-      this.setState({ total: m.total, byDoc: m.by_doc })
+      const users = (m.users || []).map((u) => ({ id: String(u.id), name: String(u.name), doc: String(u.doc), color: /^#[0-9a-f]{6}$/.test(u.color) ? u.color : '#888888' }))
+      this.setState({ total: m.total, byDoc: m.by_doc, users })
     }
   }
 
@@ -101,3 +107,27 @@ export class WsProvider {
     this.send({ t: 'upd', u: enc(u) })
   }
 }
+
+export const deleteRemote = (room, key, owner) =>
+  new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${API}/json/reqdocs/${room}/ws`)
+    let done = false
+    const timer = setTimeout(() => {
+      ws.close()
+      reject(new Error('timeout'))
+    }, 15000)
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', key, client: 'aaaaaaaa', doc: '', name: 'Propietario', owner }))
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data)
+      if (m.t === 'ready') ws.send(JSON.stringify({ t: 'del', owner }))
+      if (m.t === 'gone') {
+        done = true
+        clearTimeout(timer)
+        resolve()
+      }
+    }
+    ws.onclose = () => {
+      clearTimeout(timer)
+      if (!done) reject(new Error('closed'))
+    }
+  })
