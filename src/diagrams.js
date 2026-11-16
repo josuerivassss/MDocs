@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify'
+import { marked } from 'marked'
 import { uid } from './store.js'
 import { mokaToDiagram } from './moka.js'
 
@@ -58,3 +59,20 @@ export async function svgToPng(html) {
   const k = Math.min(1, 600 / w)
   return { data: new Uint8Array(await blob.arrayBuffer()), w: Math.round(w * k), h: Math.round(h * k) }
 }
+
+marked.use({
+  extensions: [
+    {
+      name: 'ins',
+      level: 'inline',
+      start: (s) => s.indexOf('++'),
+      tokenizer(s) {
+        const m = /^[+][+]([^+]+)[+][+]/.exec(s)
+        if (m) return { type: 'ins', raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) }
+      },
+      renderer(t) {
+        return '<u>' + this.parser.parseInline(t.tokens) + '</u>'
+      }
+    }
+  ]
+})

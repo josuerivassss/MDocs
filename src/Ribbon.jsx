@@ -8,7 +8,7 @@ export default function Ribbon({ model, tab, setTab }) {
           </button>
         ))}
       </div>
-      <div className="rb-body">
+      <div className="rb-body" key={tab}>
         {(model[tab] || []).map(([n, items]) => (
           <div className="grp" key={n}>
             <div className="grp-in">

@@ -163,18 +163,101 @@ export const getUser = () => {
 }
 export const saveUser = (u) => write('rd-user', u)
 
-export function applyToc(md) {
-  let fence = false
-  const heads = []
-  md.split('\n').forEach((l) => {
-    if (/^```/.test(l)) fence = !fence
-    const h = !fence && l.match(/^(#{1,4})\s+(.+?)\s*#*$/)
-    if (h) heads.push('  '.repeat(h[1].length - 1) + '- ' + h[2])
-  })
-  return md.replace(/^\[TOC\][ \t]*$/gm, () => heads.join('\n'))
+export const NL = String.fromCharCode(10)
+
+export function useDebounced(v, ms) {
+  const [d, setD] = useState(v)
+  useEffect(() => {
+    const t = setTimeout(() => setD(v), ms)
+    return () => clearTimeout(t)
+  }, [v, ms])
+  return d
 }
 
-export function prepare(md, vars) {
+export function applyToc(md, native = false) {
+  const lines = md.split(NL)
+  const heads = []
+  let fence = false
+  lines.forEach((l) => {
+    if (l.startsWith('```')) fence = !fence
+    const h = !fence && l.match(/^(#{1,4}) +(.+?) *#*$/)
+    if (h) heads.push({ d: h[1].length, t: h[2] })
+  })
+  fence = false
+  return lines
+    .map((l) => {
+      if (l.startsWith('```')) fence = !fence
+      const t = l.trim()
+      if (fence || !t.startsWith('[TOC') || !t.endsWith(']')) return l
+      const parts = t.slice(4, -1).replace(/^[: ]+/, '').split(',')
+      const title = parts[0].trim()
+      const pages = parts.slice(1).some((p) => p.trim().toLowerCase().startsWith('p'))
+      if (native && pages) return NL + '@@TOC@@' + title + NL
+      const items = heads.map((h, i) => '  '.repeat(h.d - 1) + '- ' + h.t + (pages ? ' ‹p' + i + '›' : ''))
+      return NL + (title ? '**' + title + '**' + NL + NL : '') + items.join(NL) + NL
+    })
+    .join(NL)
+}
+
+const isSep = (r) => r.every((c) => c.length > 0 && !c.replace(/[-: ]/g, ''))
+
+export function parseGrid(text) {
+  const rows = text
+    .split(NL)
+    .filter((l) => l.trim())
+    .map((l) => {
+      const t = l.trim()
+      const a = t.startsWith('|') ? t.slice(1) : t
+      return (a.endsWith('|') ? a.slice(0, -1) : a).split('|').map((c) => c.trim())
+    })
+  const head = rows.length > 1 && isSep(rows[1])
+  const data = head ? [rows[0], ...rows.slice(2)] : rows
+  const cols = Math.max(1, ...data.map((r) => r.length))
+  const fit = (r) => {
+    const base = Math.floor(cols / r.length)
+    return r.map((t, i) => ({ t, span: base + (i === r.length - 1 ? cols - base * r.length : 0) }))
+  }
+  return { head, cols, rows: data.map(fit) }
+}
+
+export function gridHtml(text, inline) {
+  const g = parseGrid(text)
+  const row = (r, tag) => '<tr>' + r.map((c) => '<' + tag + ' colspan=' + c.span + '>' + inline(c.t) + '</' + tag + '>').join('') + '</tr>'
+  const head = g.head ? '<thead>' + row(g.rows[0], 'th') + '</thead>' : ''
+  const body = g.rows.slice(g.head ? 1 : 0).map((r) => row(r, 'td')).join('')
+  return '<table>' + head + '<tbody>' + body + '</tbody></table>'
+}
+
+const hesc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const sp = (c, s) => '<span class=' + c + '>' + s + '</span>'
+
+export function highlight(md) {
+  let fence = false
+  const out = md.split(NL).map((raw) => {
+    const l = hesc(raw)
+    if (raw.startsWith('```')) {
+      fence = !fence
+      return sp('h-fence', l)
+    }
+    if (fence) return sp('h-code', l)
+    const t = raw.trim()
+    if (t.startsWith('[TOC') || raw.startsWith('@pagina(')) return sp('h-dir', l)
+    if (t.startsWith('|')) return l.replace(/[|]/g, sp('h-p', '|'))
+    if (raw.startsWith('#')) return sp('h-h', l)
+    if (raw.startsWith('>')) return sp('h-q', l)
+    return l
+      .replace(/^( *)([-*+]|[0-9]+[.)]) /, (a, s, m) => s + sp('h-li', m) + ' ')
+      .replace(/(`[^`]+`)/g, (a, s) => sp('h-ic', s))
+      .replace(/([*][*][^*]+[*][*])/g, (a, s) => sp('h-b', s))
+      .replace(/(~~[^~]+~~)/g, (a, s) => sp('h-s', s))
+      .replace(/([+][+][^+]+[+][+])/g, (a, s) => sp('h-u', s))
+      .replace(/(@var[(][^)]*[)])/g, (a, s) => sp('h-dir', s))
+      .replace(/([(]https?:[^)]*[)])/g, (a, s) => sp('h-url', s))
+  })
+  return out.join(NL) + NL
+}
+
+export function prepare(md, vars, native = false) {
   const defs = {}
   const body = md.replace(/^```vars[^\n]*\n([\s\S]*?)^```[ \t]*\n?/gm, (_, b) => {
     b.split('\n').forEach((l) => {
@@ -184,9 +267,8 @@ export function prepare(md, vars) {
     return ''
   })
   const all = { ...vars, ...defs }
-  return { md: applyToc(applyVars(body, all)), vars: all }
+  return { md: applyToc(applyVars(body, all), native), vars: all }
 }
-
 
 export const COVER_DEFAULTS = {
   institucion: { x: 96, y: 80, w: 624, align: 'center' },
@@ -201,7 +283,7 @@ export const PRESETS = {
   'Arriba izquierda': [80, 'left'],
   'Arriba centro': [80, 'center'],
   'Arriba derecha': [80, 'right'],
-  'Centro': [480, 'center'],
+  Centro: [480, 'center'],
   'Abajo izquierda': [900, 'left'],
   'Abajo centro': [900, 'center'],
   'Abajo derecha': [900, 'right']

@@ -2,15 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Heading1, Heading2, Heading3, Bold, Italic, List, ListOrdered, Table, Code, Workflow, RectangleHorizontal, RectangleVertical,
   Image as ImageIcon, ListTree, FileText, FileCode, FileDown, Printer, Link2, Sun, Moon, Home as HomeIcon, Plus, Pencil, X,
-  Palette, BookOpen, Wifi, WifiOff, HardDrive, ZoomIn, ZoomOut, RotateCcw
+  Palette, BookOpen, Wifi, WifiOff, HardDrive, ZoomIn, ZoomOut, RotateCcw, Underline, Strikethrough
 } from 'lucide-react'
-import { createWorkspace, newDoc, bind, useY, prepare, applyVars, FONTS, loadRooms, saveRooms, getUser, saveUser, coverPos } from './store.js'
+import { createWorkspace, newDoc, bind, useY, prepare, applyVars, FONTS, loadRooms, saveRooms, getUser, saveUser, NL, highlight, coverPos } from './store.js'
 import { TEMPLATES } from './templates.js'
 import { CoverPanel } from './Cover.jsx'
 import { StylePanel } from './StylePanel.jsx'
 import Preview from './Preview.jsx'
 import Ribbon from './Ribbon.jsx'
 import Home from './Home.jsx'
+import { Window, DialogHost, ask } from './Dialog.jsx'
 import { exportMd, exportHtml, exportDocx } from './export.js'
 
 const logo = import.meta.env.BASE_URL + 'logo.png'
@@ -44,7 +45,17 @@ function DocView({ S }) {
   const [panel, setPanel] = useState(null)
   const [tab, setTab] = useState('Inicio')
   const ta = useRef()
+  const hl = useRef()
   const main = useRef()
+  const [busy, setBusy] = useState('')
+  const run = async (label, fn) => {
+    setBusy(label)
+    try {
+      await fn()
+    } finally {
+      setBusy('')
+    }
+  }
   const md = S.text.toString()
   const m = Object.fromEntries(S.meta.entries())
   const bl = S.blocks.toArray()
@@ -79,31 +90,49 @@ function DocView({ S }) {
     })
   }
 
-  const image = () => {
-    const u = prompt('URL de la imagen (https://...)')
-    if (!u || !/^https:\/\//i.test(u)) return
-    const t = (prompt('Texto alternativo') || 'imagen').replace(/[[\]]/g, '')
-    wrap('', `![${t}](${u})`, '')
+  const image = async () => {
+    const u = await ask({ title: 'Insertar imagen', text: 'Escribe la URL de la imagen (https://...)', input: true, placeholder: 'https://' })
+    if (!u || !u.startsWith('https://')) return
+    const t = await ask({ title: 'Texto alternativo', text: 'Describe la imagen', input: true })
+    const alt = (t || 'imagen').split('[').join('').split(']').join('')
+    wrap('', '![' + alt + '](' + u + ')', '')
   }
 
-  const pickTemplate = (e) => {
+  const pickTemplate = async (e) => {
     const k = e.target.value
     e.target.value = ''
-    if (k && confirm('¿Reemplazar el contenido actual por la plantilla ' + k + '?')) {
+    if (!k) return
+    const ok = await ask({ title: 'Aplicar plantilla', text: 'Se reemplazará el contenido actual por la plantilla ' + k + '.', ok: 'Reemplazar', danger: true })
+    if (ok) {
       setMd(TEMPLATES[k])
       S.meta.set('tipo', k)
     }
   }
 
-  const drag = (e) => {
-    if (e.buttons !== 1) return
-    const r = main.current.getBoundingClientRect()
-    setSplit(Math.min(85, Math.max(15, ((e.clientX - r.left) / r.width) * 100)))
+  const onKey = (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return
+    const t = e.target
+    if (t.selectionStart !== t.selectionEnd) return
+    const pos = t.selectionStart
+    const v = t.value
+    const start = v.lastIndexOf(NL, pos - 1) + 1
+    const line = v.slice(start, pos)
+    const num = line.match(/^( *)([0-9]+)([.)]) (.*)$/)
+    const bul = line.match(/^( *)([-*+]) (.*)$/)
+    if (!num && !bul) return
+    e.preventDefault()
+    const text = num ? num[4] : bul[3]
+    if (!text.trim()) {
+      setMd(v.slice(0, start) + v.slice(pos))
+      requestAnimationFrame(() => t.setSelectionRange(start, start))
+      return
+    }
+    const marker = num ? num[1] + (Number(num[2]) + 1) + num[3] + ' ' : bul[1] + bul[2] + ' '
+    setMd(v.slice(0, pos) + NL + marker + v.slice(pos))
+    requestAnimationFrame(() => t.setSelectionRange(pos + 1 + marker.length, pos + 1 + marker.length))
   }
 
-  const toggle = (p) => setPanel(panel === p ? null : p)
-
-    const moveCover = (id, pos) => {
+  const moveCover = (id, pos) => {
     if (typeof id === 'string') {
       S.meta.set('pos_' + id, { ...coverPos(m, id), ...pos })
       return
@@ -114,9 +143,17 @@ function DocView({ S }) {
     })
   }
 
+  const drag = (e) => {
+    if (e.buttons !== 1) return
+    const r = main.current.getBoundingClientRect()
+    setSplit(Math.min(85, Math.max(15, ((e.clientX - r.left) / r.width) * 100)))
+  }
+
+  const toggle = (p) => setPanel(panel === p ? null : p)
+
   const model = {
     Archivo: [
-      ['Exportar', [B(FileText, 'Markdown', () => exportMd(md, m, vars), 1), B(FileCode, 'HTML', () => exportHtml(rm, rst), 1), B(FileDown, 'Word', () => exportDocx(pre.md, rm, bl, rst), 1), B(Printer, 'PDF', () => window.print(), 1)]],
+      ['Exportar', [B(FileText, 'Markdown', () => exportMd(md, m, vars), 1), B(FileCode, 'HTML', () => exportHtml(rm, rst), 1), B(FileDown, 'Word', () => run('Generando Word…', () => exportDocx(prepare(md, vars, true).md, rm, bl, rst)), 1), B(Printer, 'PDF', () => window.print(), 1)]],
       [
         'Plantillas',
         [
@@ -150,7 +187,9 @@ function DocView({ S }) {
           },
           { node: <input type="number" title="Tamaño del texto (pt)" style={{ width: 52 }} value={st.sizeBody ?? 11} onChange={(e) => S.style.set('sizeBody', Number(e.target.value))} /> },
           B(Bold, 'Negrita', () => wrap('**', '**')),
-          B(Italic, 'Cursiva', () => wrap('*', '*'))
+          B(Italic, 'Cursiva', () => wrap('*', '*')),
+          B(Underline, 'Subrayado', () => wrap('++', '++')),
+          B(Strikethrough, 'Tachado', () => wrap('~~', '~~'))
         ]
       ],
       ['Párrafo', [B(Heading1, 'Título 1', () => wrap('# ', '')), B(Heading2, 'Título 2', () => wrap('## ', '')), B(Heading3, 'Título 3', () => wrap('### ', '')), B(List, 'Viñetas', () => wrap('- ', '')), B(ListOrdered, 'Numeración', () => wrap('1. ', ''))]]
@@ -178,12 +217,43 @@ function DocView({ S }) {
 
   return (
     <>
+      {busy && (
+        <div className="dlg-back">
+          <div className="dlg pop loader">
+            <span className="spin big" />
+            {busy}
+          </div>
+        </div>
+      )}
+      {panel === 'cover' && (
+        <Window title="Portada" onClose={() => setPanel(null)}>
+          <CoverPanel S={S} m={m} bl={bl} />
+        </Window>
+      )}
+      {panel === 'style' && (
+        <Window title="Estilo y variables" x={140} y={170} onClose={() => setPanel(null)}>
+          <StylePanel S={S} st={st} vars={vars} />
+        </Window>
+      )}
       <Ribbon model={model} tab={tab} setTab={setTab} />
       <div className="main" ref={main}>
         <section className="left" style={{ width: `calc(${split}% - 4px)` }}>
-          {panel === 'cover' && <CoverPanel S={S} m={m} bl={bl} />}
-          {panel === 'style' && <StylePanel S={S} st={st} vars={vars} />}
-          <textarea ref={ta} className="editor" spellCheck={false} style={{ fontSize: 14 * ze + 'px' }} value={md} onChange={(e) => setMd(e.target.value)} />
+          <div className="ed-wrap">
+            <pre ref={hl} className="hl" aria-hidden="true" style={{ fontSize: 14 * ze + 'px' }} dangerouslySetInnerHTML={{ __html: highlight(md) }} />
+            <textarea
+              ref={ta}
+              className="editor"
+              spellCheck={false}
+              style={{ fontSize: 14 * ze + 'px' }}
+              value={md}
+              onChange={(e) => setMd(e.target.value)}
+              onKeyDown={onKey}
+              onScroll={(e) => {
+                hl.current.scrollTop = e.target.scrollTop
+                hl.current.scrollLeft = e.target.scrollLeft
+              }}
+            />
+          </div>
         </section>
         <div className="resizer" onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)} onPointerMove={drag} />
         <section className="right">
@@ -219,6 +289,19 @@ function Room({ room, keyStr, user, notify, theme, setTheme }) {
   const [active, setActive] = useState(null)
   const [net, setNet] = useState(W.rtc.state)
   const [saved, setSaved] = useState(false)
+  const seen = useRef(null)
+  useEffect(() => {
+    const now = new Map(net.users.map((u) => [u.id, u.name]))
+    if (seen.current && net.ready) {
+      now.forEach((n, uid) => {
+        if (!seen.current.has(uid) && uid !== W.rtc.cid) notify(n + ' se unió a la sala', 'success')
+      })
+      seen.current.forEach((n, uid) => {
+        if (!now.has(uid)) notify(n + ' salió de la sala')
+      })
+    }
+    if (net.ready) seen.current = now
+  }, [net.users])
 
   useEffect(() => {
     W.idb.whenSynced.then(() => setSaved(true))
@@ -248,12 +331,13 @@ function Room({ room, keyStr, user, notify, theme, setTheme }) {
     if (id) W.rtc.setDoc(id)
   }, [id])
 
-  const rename = () => {
-    const n = prompt('Nombre del documento', String(W.docs.get(id).get('name')))
+  const rename = async () => {
+    const n = await ask({ title: 'Renombrar documento', text: 'Nuevo nombre', input: true, value: String(W.docs.get(id).get('name')) })
     if (n && n.trim()) W.docs.get(id).set('name', n.trim().slice(0, 60))
   }
-  const remove = () => {
-    if (ids.length > 1 && confirm('¿Eliminar este documento para todos los participantes?')) W.docs.delete(id)
+  const remove = async () => {
+    const ok = ids.length > 1 && (await ask({ title: 'Eliminar documento', text: 'Se eliminará para todos los participantes.', ok: 'Eliminar', danger: true }))
+    if (ok) W.docs.delete(id)
   }
   const share = () => navigator.clipboard.writeText(location.href).then(() => notify('Enlace copiado al portapapeles'))
   const docName = (d) => (W.docs.has(d) ? String(W.docs.get(d).get('name')) : '')
@@ -266,7 +350,7 @@ function Room({ room, keyStr, user, notify, theme, setTheme }) {
         </button>
         <span className="badge" title={net.online ? 'Conectado al servidor' : 'Sin conexión: los cambios se guardan y se fusionan al reconectar'}>
           {net.online ? <Wifi size={14} /> : <WifiOff size={14} />}
-          {net.online ? (net.ready ? 'Sincronizado' : 'Conectando') : 'Sin conexión'}
+          {net.online ? (net.ready ? 'Sincronizado' : (<><span className="spin" /> Conectando</>)) : 'Sin conexión'}
         </span>
         <span className="badge" title="Guardado automático en este navegador">
           <HardDrive size={14} /> {saved ? 'Guardado local' : 'Cargando'}
@@ -305,7 +389,7 @@ function Room({ room, keyStr, user, notify, theme, setTheme }) {
           <Plus size={14} />
         </button>
       </nav>
-      {S ? <DocView key={id} S={S} /> : <p className="loading">Cargando…</p>}
+      {S ? <DocView key={id} S={S} /> : <div className="loader"><span className="spin big" /> Cargando documento…</div>}
     </div>
   )
 }
@@ -342,7 +426,7 @@ function NameModal({ onDone }) {
 
 export default function App() {
   const [hash, setHash] = useState(location.hash)
-  const [toast, setToast] = useState('')
+  const [toasts, setToasts] = useState([])
   const [user, setUser] = useState(getUser)
   const [theme, setTheme] = useState(initTheme)
 
@@ -361,9 +445,10 @@ export default function App() {
     }
   }, [theme])
 
-  const notify = (t) => {
-    setToast(t)
-    setTimeout(() => setToast(''), 2500)
+  const notify = (text, kind = 'info') => {
+    const id = Math.random()
+    setToasts((l) => [...l, { id, text, kind }])
+    setTimeout(() => setToasts((l) => l.filter((x) => x.id !== id)), 3500)
   }
 
   const p = new URLSearchParams(hash.slice(1))
@@ -394,7 +479,14 @@ export default function App() {
           <Home notify={notify} />
         </div>
       )}
-      {toast && <div className="toast">{toast}</div>}
+      <div className="toasts">
+        {toasts.map((x) => (
+          <div key={x.id} className={'toast ' + x.kind}>
+            {x.text}
+          </div>
+        ))}
+      </div>
+      <DialogHost />
     </>
   )
 }

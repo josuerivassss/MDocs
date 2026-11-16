@@ -2,11 +2,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { CoverSheet } from './Cover.jsx'
-import { splitSections, styleVars } from './store.js'
+import { splitSections, styleVars, useDebounced, gridHtml } from './store.js'
 import { cache, ensure, keyOf, isDiagram } from './diagrams.js'
 
 DOMPurify.addHook('afterSanitizeAttributes', (n) => {
-  if (n.tagName === 'IMG' && !/^data:image\/(png|jpeg|gif);base64,/.test(n.getAttribute('src') || '')) n.removeAttribute('src')
+  if (n.tagName === 'IMG') {
+    if (!/^(data:image\/(png|jpeg|gif);base64,|https:\/\/)/.test(n.getAttribute('src') || '')) n.removeAttribute('src')
+    n.setAttribute('referrerpolicy', 'no-referrer')
+  }
   if (n.tagName === 'A') {
     n.setAttribute('rel', 'noopener noreferrer')
     n.setAttribute('target', '_blank')
@@ -23,6 +26,7 @@ let cur = []
 marked.use({
   renderer: {
     code({ text, lang }) {
+      if (lang === 'tabla') return gridHtml(text, (s) => marked.parseInline(s))
       if (!isDiagram(lang)) return false
       cur.push([lang, text])
       return `<div class="mmd" data-m="${cur.length - 1}"></div>`
@@ -34,7 +38,7 @@ function render(s) {
   cur = []
   const found = cur
   const h = DOMPurify.sanitize(marked.parse(s), CLEAN)
-  return h.replace(/<div class="mmd" data-m="(\d+)"><\/div>/g, (a, i) => `<div class="mmd">${cache.get(keyOf(found[i][0], found[i][1])) ?? 'Renderizando diagrama…'}</div>`)
+  return h.replace(/<div class="mmd" data-m="(\d+)"><\/div>/g, (a, i) => `<div class="mmd">${cache.get(keyOf(found[i][0], found[i][1])) ?? `<span class="spin"></span> Renderizando diagrama…`}</div>`)
 }
 
 function paginate(el, limit) {
@@ -106,14 +110,15 @@ function paginate(el, limit) {
   return pages.map((p) => p.join(''))
 }
 
-export default function Preview({ md, m, bl, st, zoom, onMove }) {
+export default function Preview({ md: rawMd, m, bl, st, zoom, onMove }) {
+  const md = useDebounced(rawMd, 250)
   const ref = useRef()
   const [pages, setPages] = useState([])
   const [tick, setTick] = useState(0)
   const vars = styleVars(st)
   const sk = JSON.stringify(vars)
 
-    useEffect(() => {
+  useEffect(() => {
     const need = new Map()
     marked.walkTokens(marked.lexer(md), (t) => {
       if (t.type !== 'code' || !isDiagram(t.lang)) return
@@ -141,7 +146,17 @@ export default function Preview({ md, m, bl, st, zoom, onMove }) {
       el.innerHTML = render(s.md)
       paginate(el, land ? 640 : 880).forEach((html) => out.push({ land, html }))
     })
-    setPages(out)
+    const where = []
+    out.forEach((p, i) => {
+      const n = (p.html.match(/<h[1-4][ >]/g) || []).length
+      for (let k = 0; k < n; k++) where.push(i + 1)
+    })
+    setPages(
+      out.map((p) => ({
+        ...p,
+        html: p.html.replace(/‹p([0-9]+)›/g, (a, i) => `<span class='toc-p'>${where[i] ?? ''}</span>`)
+      }))
+    )
   }, [md, tick, sk])
 
   return (

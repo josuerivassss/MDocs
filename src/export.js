@@ -20,9 +20,11 @@ import {
   VerticalPositionRelativeFrom,
   Header,
   BorderStyle,
-  PageOrientation
+  PageOrientation,
+  FrameAnchorType,
+  TableOfContents
 } from 'docx'
-import { splitSections, safeImg, cleanStyle, styleVars, coverPos, blockPos } from './store.js'
+import { splitSections, safeImg, cleanStyle, styleVars, coverPos, blockPos, parseGrid } from './store.js'
 import { cache, keyOf, isDiagram, ensure, svgToPng } from './diagrams.js'
 
 let ST = cleanStyle({})
@@ -58,7 +60,7 @@ export function exportHtml(m, st) {
     .map(([k, x]) => `${k}:${x}`)
     .join(';')
   const title = String(m.titulo || 'Documento').replace(/[<>&"]/g, '')
-  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><title>${title}</title><style>${css}</style></head><body class="standalone"><div class="sheets" style="${v}">${body}</div></body></html>`
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https:"><title>${title}</title><style>${css}</style></head><body class="standalone"><div class="sheets" style="${v}">${body}</div></body></html>`
   saveAs(new Blob([html], { type: 'text/html;charset=utf-8' }), slug(m) + '.html')
 }
 
@@ -74,6 +76,8 @@ const inl = (ts, st = {}) =>
   (ts || []).flatMap((t) => {
     if (t.type === 'strong') return inl(t.tokens, { ...st, bold: true })
     if (t.type === 'em') return inl(t.tokens, { ...st, italics: true })
+    if (t.type === 'del') return inl(t.tokens, { ...st, strike: true })
+    if (t.type === 'ins') return inl(t.tokens, { ...st, underline: {} })
     if (t.type === 'codespan') return [new TextRun({ text: dec(t.text), font: 'Consolas', ...st })]
     if (t.type === 'br') return [new TextRun({ break: 1 })]
     if (t.tokens) return inl(t.tokens, st)
@@ -84,8 +88,38 @@ const blk = (t, lv = 0) => {
   if (t.type === 'heading') {
     return [new Paragraph({ heading: heads[t.depth], children: inl(t.tokens), spacing: { before: 240, after: 120 } })]
   }
+  if (t.type === 'paragraph' && t.raw.startsWith('@@TOC@@')) {
+    const title = t.raw.slice(7).trim()
+    return [
+      ...(title ? [new Paragraph({ children: [new TextRun({ text: title, bold: true })] })] : []),
+      new TableOfContents('Contenido', { hyperlink: true, headingStyleRange: '1-4' })
+    ]
+  }
   if (t.type === 'paragraph') return [new Paragraph({ children: inl(t.tokens), spacing: { after: 120 } })]
   if (t.type === 'blockquote') return t.tokens.flatMap((x) => blk(x, lv))
+  if (t.type === 'code' && t.lang === 'tabla') {
+    const g = parseGrid(t.text)
+    const cell = (c, h, z) =>
+      new TableCell({
+        columnSpan: c.span,
+        children: [new Paragraph({ children: inl(marked.Lexer.lexInline(c.t), h ? { bold: true, color: ST.tbHeadText.slice(1) } : {}) })],
+        margins: { top: ST.tbPad * 15, bottom: ST.tbPad * 15, left: 100, right: 100 },
+        shading: h || z ? { type: ShadingType.CLEAR, fill: (h ? ST.tbHead : ST.tbZebra).slice(1) } : undefined
+      })
+    const body = g.rows.slice(g.head ? 1 : 0)
+    return [
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        columnWidths: Array(g.cols).fill(Math.floor(9360 / g.cols)),
+        borders: bd(),
+        rows: [
+          ...(g.head ? [new TableRow({ tableHeader: true, children: g.rows[0].map((c) => cell(c, true, false)) })] : []),
+          ...body.map((r, i) => new TableRow({ children: r.map((c) => cell(c, false, i % 2 === 1)) }))
+        ]
+      }),
+      new Paragraph('')
+    ]
+  }
   if (t.type === 'code') {
     const im = isDiagram(t.lang) && IMGS.get(keyOf(t.lang, t.text))
     if (im) {
@@ -185,7 +219,7 @@ const cover = (m, bl) => [
 
 export async function exportDocx(md, m, bl, st) {
   ST = cleanStyle(st)
-    const found = new Map()
+  const found = new Map()
   marked.walkTokens(marked.lexer(md || ''), (t) => {
     if (t.type === 'code' && isDiagram(t.lang)) found.set(keyOf(t.lang, t.text), [t.lang, t.text])
   })
@@ -238,6 +272,7 @@ export async function exportDocx(md, m, bl, st) {
     paragraph: { spacing: { before: 240, after: 120 } }
   }))
   const doc = new Document({
+    features: { updateFields: true },
     styles: { default: { document: { run: { font: fb, size: ST.sizeBody * 2 } } }, paragraphStyles: hs },
     sections: [{ properties: { page: { size: size('v'), margin } }, children: cover(m, bl) }, ...content]
   })
